@@ -53,7 +53,9 @@ pub fn greedy_continue<M: Model>(
         .enumerate()
         .map(|(position, token_id)| token_row(*token_id, position))
         .collect::<Result<Vec<_>, _>>()?;
-    let prefill = model.forward(&prompt_rows).map_err(GenerateError::Forward)?;
+    let prefill = model
+        .forward(&prompt_rows)
+        .map_err(GenerateError::Forward)?;
     if prefill.len() != prompt.len() {
         return Err(GenerateError::EmptyLogits);
     }
@@ -91,7 +93,10 @@ pub fn greedy_continue<M: Model>(
         if scored.len() != 1 {
             return Err(GenerateError::EmptyLogits);
         }
-        logits = scored.into_iter().next().ok_or(GenerateError::EmptyLogits)?;
+        logits = scored
+            .into_iter()
+            .next()
+            .ok_or(GenerateError::EmptyLogits)?;
         position += 1;
     }
 }

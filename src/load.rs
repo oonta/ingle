@@ -36,6 +36,8 @@ pub enum StartupError {
     Read { path: PathBuf },
     MissingAvx2,
     KvPoolTooSmall,
+    PortInUse { port: u16 },
+    Bind { address: String },
 }
 
 impl std::fmt::Display for StartupError {
@@ -51,16 +53,28 @@ impl std::fmt::Display for StartupError {
                 )
             }
             Self::UnsupportedQuantization { path } => {
-                write!(f, "the quantization type is not supported: {}", path.display())
+                write!(
+                    f,
+                    "the quantization type is not supported: {}",
+                    path.display()
+                )
             }
-            Self::NoVocabulary { path } => write!(f, "the file has no vocabulary: {}", path.display()),
+            Self::NoVocabulary { path } => {
+                write!(f, "the file has no vocabulary: {}", path.display())
+            }
             Self::NoEos { path } => {
-                write!(f, "the file has no tokenizer.ggml.eos_token_id: {}", path.display())
+                write!(
+                    f,
+                    "the file has no tokenizer.ggml.eos_token_id: {}",
+                    path.display()
+                )
             }
             Self::MissingKey { path, key } => write!(f, "missing {key} in {}", path.display()),
             Self::Read { path } => write!(f, "failed to read {}", path.display()),
             Self::MissingAvx2 => write!(f, "the CPU lacks AVX2"),
             Self::KvPoolTooSmall => write!(f, "the KV pool must be at least 64 MiB"),
+            Self::PortInUse { port } => write!(f, "the port {port} is in use"),
+            Self::Bind { address } => write!(f, "failed to bind {address}"),
         }
     }
 }
@@ -91,9 +105,10 @@ pub(crate) fn read_gguf(path: &Path) -> Result<(File, Content), StartupError> {
             path: path.to_path_buf(),
         });
     }
-    file.seek(SeekFrom::Start(0)).map_err(|_| StartupError::Read {
-        path: path.to_path_buf(),
-    })?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| StartupError::Read {
+            path: path.to_path_buf(),
+        })?;
     let content = Content::read(&mut file).map_err(|error| classify_gguf_error(path, &error))?;
     Ok((file, content))
 }
@@ -349,7 +364,12 @@ mod tests {
         bytes
     }
 
-    fn llama_body(name: Option<&str>, rope: Option<f32>, key_length: Option<u32>, add_bos: bool) -> (Vec<u8>, u64) {
+    fn llama_body(
+        name: Option<&str>,
+        rope: Option<f32>,
+        key_length: Option<u32>,
+        add_bos: bool,
+    ) -> (Vec<u8>, u64) {
         let mut body = Vec::new();
         let mut count = 0u64;
         let mut add = |write: &dyn Fn(&mut Vec<u8>)| {
@@ -390,14 +410,22 @@ mod tests {
         let _ = fs::remove_file(&path);
         let error = inspect_gguf(&path, 4096).unwrap_err();
         assert_eq!(error, StartupError::FileNotFound { path: path.clone() });
-        assert_eq!(error.to_string(), format!("file not found: {}", path.display()));
+        assert_eq!(
+            error.to_string(),
+            format!("file not found: {}", path.display())
+        );
     }
 
     #[test]
     fn a_bad_magic_is_not_a_gguf() {
         let file = TempFile::write("bad-magic", b"not a model");
         let error = inspect_gguf(&file.path, 4096).unwrap_err();
-        assert_eq!(error, StartupError::NotGguf { path: file.path.clone() });
+        assert_eq!(
+            error,
+            StartupError::NotGguf {
+                path: file.path.clone()
+            }
+        );
         assert!(error.to_string().contains("not a GGUF"));
     }
 
@@ -406,7 +434,9 @@ mod tests {
         let file = TempFile::write("truncated", b"GGUF");
         assert_eq!(
             inspect_gguf(&file.path, 4096).unwrap_err(),
-            StartupError::Read { path: file.path.clone() }
+            StartupError::Read {
+                path: file.path.clone()
+            }
         );
     }
 
@@ -421,7 +451,9 @@ mod tests {
         let file = TempFile::write("bad-dtype", &gguf(1, &body, 0));
         assert_eq!(
             inspect_gguf(&file.path, 4096).unwrap_err(),
-            StartupError::UnsupportedQuantization { path: file.path.clone() }
+            StartupError::UnsupportedQuantization {
+                path: file.path.clone()
+            }
         );
     }
 
@@ -455,7 +487,9 @@ mod tests {
         let file = TempFile::write("empty-vocab", &gguf(0, &body, 3));
         assert_eq!(
             inspect_gguf(&file.path, 4096).unwrap_err(),
-            StartupError::NoVocabulary { path: file.path.clone() }
+            StartupError::NoVocabulary {
+                path: file.path.clone()
+            }
         );
     }
 
@@ -477,10 +511,7 @@ mod tests {
         assert!(card.add_bos);
         assert_eq!(card.bos_id, 1);
         assert_eq!(card.vocab_size, 3);
-        assert_eq!(
-            card.tokens,
-            ["<unk>", "<s>", "</s>"].map(str::to_string)
-        );
+        assert_eq!(card.tokens, ["<unk>", "<s>", "</s>"].map(str::to_string));
     }
 
     #[test]
@@ -503,7 +534,8 @@ mod tests {
         add(&|buf| kv_u32(buf, "tokenizer.ggml.bos_token_id", 0));
         let file = TempFile::write("encode", &gguf(0, &body, count));
         let card = inspect_gguf(&file.path, 4096).unwrap();
-        let ids = crate::encode::encode_prompt("hi", &card.tokens, card.add_bos, card.bos_id).unwrap();
+        let ids =
+            crate::encode::encode_prompt("hi", &card.tokens, card.add_bos, card.bos_id).unwrap();
         assert_eq!(ids, vec![0, 1]);
     }
 

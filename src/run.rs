@@ -1,11 +1,14 @@
 use std::ffi::OsString;
 
-use crate::cli::{parse_args, read_prompt, Command, GenerateCommand, UsageError};
-use crate::encode::{decode_tokens, encode_prompt, DecodeError, EncodeError};
-use crate::generate::{greedy_continue, GenerateError, Model};
-use crate::llama::load_llama;
+use crate::cli::{Command, GenerateCommand, ServeCommand, UsageError, parse_args, read_prompt};
+use crate::encode::{DecodeError, EncodeError, decode_tokens, encode_prompt};
+use crate::generate::{GenerateError, Model, greedy_continue};
+use crate::http::{bind_listener, serve_addr};
+use crate::llama::{LlamaModel, load_llama};
 use crate::load::{ModelCard, StartupError};
-use crate::platform::{detect_ram_mb, require_host_simd, resolve_kv_pool, startup_line, target_triple, PoolRequest};
+use crate::platform::{
+    PoolRequest, detect_ram_mb, require_host_simd, resolve_kv_pool, startup_line, target_triple,
+};
 
 /// Working context when `generate` is not given `--max-context`.
 const DEFAULT_MAX_CONTEXT: u32 = 4096;
@@ -21,13 +24,21 @@ pub enum RunError {
 
 /// Parse `args`, load the GGUF file, and return the greedy continuation.
 /// `stdin` is used only when the positional prompt is omitted.
-pub fn generate_text<I, S>(args: I, infer_model: Option<&str>, stdin: &str) -> Result<String, RunError>
+pub fn generate_text<I, S>(
+    args: I,
+    infer_model: Option<&str>,
+    stdin: &str,
+) -> Result<String, RunError>
 where
     I: IntoIterator<Item = S>,
     S: Into<OsString> + Clone,
 {
     let command = parse_args(args, infer_model).map_err(RunError::Usage)?;
-    let Command::Generate(command) = command;
+    let Command::Generate(command) = command else {
+        return Err(RunError::Usage(UsageError {
+            message: "expected generate".to_string(),
+        }));
+    };
     generate_from_command(command, stdin)
 }
 
@@ -41,6 +52,29 @@ pub fn generate_from_command(command: GenerateCommand, stdin: &str) -> Result<St
         load_llama(&command.model, DEFAULT_MAX_CONTEXT).map_err(RunError::Startup)?;
     continuation_text(&mut model, &card, &prompt, command.max_tokens)
         .map_err(RunError::Continuation)
+}
+
+/// A loaded model and the socket that opened only after that load.
+pub struct Listening {
+    pub card: ModelCard,
+    pub model: LlamaModel,
+    pub listener: std::net::TcpListener,
+}
+
+/// Check the CPU, log the pool, load the GGUF file, then bind `command`.
+pub fn open_serve(command: &ServeCommand) -> Result<Listening, RunError> {
+    require_host_simd().map_err(RunError::Startup)?;
+    let pool = resolve_kv_pool(PoolRequest::Auto, detect_ram_mb()).map_err(RunError::Startup)?;
+    tracing::info!("{}", startup_line(target_triple(), &pool));
+    let (card, model) =
+        load_llama(&command.model, DEFAULT_MAX_CONTEXT).map_err(RunError::Startup)?;
+    let addr = serve_addr(&command.host, command.port).map_err(RunError::Startup)?;
+    let listener = bind_listener(addr).map_err(RunError::Startup)?;
+    Ok(Listening {
+        card,
+        model,
+        listener,
+    })
 }
 
 /// The prompt did not become printed text.
@@ -67,7 +101,7 @@ pub fn continuation_text<M: Model>(
 
 #[cfg(test)]
 mod tests {
-    use super::{continuation_text, generate_text, ContinuationError, RunError};
+    use super::{ContinuationError, RunError, continuation_text, generate_text, open_serve};
     use crate::generate::{Model, ModelError, TokenRow};
     use crate::load::{ModelCard, StartupError};
 
@@ -160,6 +194,24 @@ mod tests {
             "",
         )
         .unwrap_err();
+        match error {
+            RunError::Startup(StartupError::FileNotFound { path: got }) => assert_eq!(got, path),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_missing_serve_model_is_reported_before_the_port_opens() {
+        let path = std::env::temp_dir().join("ingle-no-such-serve-model.gguf");
+        let _ = std::fs::remove_file(&path);
+        let error = match open_serve(&crate::cli::ServeCommand {
+            model: path.clone(),
+            host: "192.0.2.1".to_string(),
+            port: 9,
+        }) {
+            Err(error) => error,
+            Ok(_) => panic!("expected a missing file"),
+        };
         match error {
             RunError::Startup(StartupError::FileNotFound { path: got }) => assert_eq!(got, path),
             other => panic!("unexpected error: {other:?}"),

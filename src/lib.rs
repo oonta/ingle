@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod encode;
 pub mod generate;
+pub mod http;
 pub mod llama;
 pub mod load;
 pub mod platform;

@@ -64,9 +64,15 @@ pub fn resolve_kv_pool(
 /// One English startup line. It does not include prompt text.
 pub fn startup_line(triple: &str, pool: &ResolvedPool) -> String {
     match pool.ram_mb {
-        Some(ram) => format!("target {triple}, physical RAM {ram} MiB, KV pool {} MiB", pool.mb),
+        Some(ram) => format!(
+            "target {triple}, physical RAM {ram} MiB, KV pool {} MiB",
+            pool.mb
+        ),
         None if pool.fallback => {
-            format!("target {triple}, physical RAM unavailable, KV pool {} MiB", pool.mb)
+            format!(
+                "target {triple}, physical RAM unavailable, KV pool {} MiB",
+                pool.mb
+            )
         }
         None => format!("target {triple}, KV pool {} MiB", pool.mb),
     }
@@ -123,7 +129,8 @@ fn host_has_avx2() -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        CpuArch, PoolRequest, ResolvedPool, known_triple, require_avx2, resolve_kv_pool, startup_line,
+        CpuArch, PoolRequest, ResolvedPool, known_triple, require_avx2, resolve_kv_pool,
+        startup_line,
     };
     use crate::load::StartupError;
 
@@ -219,14 +226,8 @@ mod tests {
 
     #[test]
     fn known_triples_match_the_version_1_matrix() {
-        assert_eq!(
-            known_triple("x86_64", "windows"),
-            "x86_64-pc-windows-msvc"
-        );
-        assert_eq!(
-            known_triple("x86_64", "linux"),
-            "x86_64-unknown-linux-gnu"
-        );
+        assert_eq!(known_triple("x86_64", "windows"), "x86_64-pc-windows-msvc");
+        assert_eq!(known_triple("x86_64", "linux"), "x86_64-unknown-linux-gnu");
         assert_eq!(known_triple("aarch64", "macos"), "aarch64-apple-darwin");
         assert_eq!(known_triple("x86_64", "macos"), "unknown");
     }

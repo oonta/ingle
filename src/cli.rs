@@ -7,6 +7,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
     Generate(GenerateCommand),
+    Serve(ServeCommand),
 }
 
 /// Arguments of `ingle generate` after defaults and `INFER_MODEL` are applied.
@@ -15,6 +16,14 @@ pub struct GenerateCommand {
     pub model: PathBuf,
     pub max_tokens: u32,
     pub prompt: PromptInput,
+}
+
+/// Arguments of `ingle serve` after defaults and `INFER_MODEL` are applied.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ServeCommand {
+    pub model: PathBuf,
+    pub host: String,
+    pub port: u16,
 }
 
 /// Where the prompt text comes from.
@@ -56,6 +65,18 @@ enum CliCommand {
         /// Prompt text. When omitted, the prompt is read from stdin.
         prompt: Option<String>,
     },
+    /// Serve the loaded model over HTTP.
+    Serve {
+        /// Path to the GGUF file. Overrides `INFER_MODEL`.
+        #[arg(long, value_name = "PATH")]
+        model: Option<PathBuf>,
+        /// Address to bind. Defaults to the loopback interface.
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Port to bind.
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+    },
 }
 
 /// Parse `args` as `ingle` saw them, including the program name.
@@ -73,31 +94,43 @@ where
             });
         }
     };
-    let CliCommand::Generate {
-        model,
-        max_tokens,
-        prompt,
-    } = cli.command;
-    let model = match model {
-        Some(path) => path,
+    match cli.command {
+        CliCommand::Generate {
+            model,
+            max_tokens,
+            prompt,
+        } => {
+            let model = resolve_model(model, infer_model)?;
+            let prompt = match prompt {
+                Some(text) => PromptInput::Text(text),
+                None => PromptInput::Stdin,
+            };
+            Ok(Command::Generate(GenerateCommand {
+                model,
+                max_tokens,
+                prompt,
+            }))
+        }
+        CliCommand::Serve { model, host, port } => {
+            let model = resolve_model(model, infer_model)?;
+            Ok(Command::Serve(ServeCommand { model, host, port }))
+        }
+    }
+}
+
+fn resolve_model(model: Option<PathBuf>, infer_model: Option<&str>) -> Result<PathBuf, UsageError> {
+    match model {
+        Some(path) => Ok(path),
         None => match infer_model {
-            Some(path) if !path.is_empty() => PathBuf::from(path),
-            _ => {
-                return Err(UsageError {
-                    message: format!("missing --model (or INFER_MODEL)\n\n{}", Cli::command().render_help()),
-                });
-            }
+            Some(path) if !path.is_empty() => Ok(PathBuf::from(path)),
+            _ => Err(UsageError {
+                message: format!(
+                    "missing --model (or INFER_MODEL)\n\n{}",
+                    Cli::command().render_help()
+                ),
+            }),
         },
-    };
-    let prompt = match prompt {
-        Some(text) => PromptInput::Text(text),
-        None => PromptInput::Stdin,
-    };
-    Ok(Command::Generate(GenerateCommand {
-        model,
-        max_tokens,
-        prompt,
-    }))
+    }
 }
 
 /// Resolve the prompt text. A positional value is used as-is and `stdin` is ignored.
@@ -115,12 +148,28 @@ pub fn read_prompt(input: PromptInput, stdin: &str) -> Result<String, EmptyPromp
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, EmptyPrompt, GenerateCommand, PromptInput, parse_args, read_prompt};
+    use super::{
+        Command, EmptyPrompt, GenerateCommand, PromptInput, ServeCommand, parse_args, read_prompt,
+    };
     use std::path::PathBuf;
 
-    fn generate<'a>(args: impl IntoIterator<Item = &'a str>, infer_model: Option<&str>) -> GenerateCommand {
+    fn generate<'a>(
+        args: impl IntoIterator<Item = &'a str>,
+        infer_model: Option<&str>,
+    ) -> GenerateCommand {
         match parse_args(args, infer_model).unwrap() {
             Command::Generate(command) => command,
+            Command::Serve(_) => panic!("expected generate"),
+        }
+    }
+
+    fn serve<'a>(
+        args: impl IntoIterator<Item = &'a str>,
+        infer_model: Option<&str>,
+    ) -> ServeCommand {
+        match parse_args(args, infer_model).unwrap() {
+            Command::Serve(command) => command,
+            Command::Generate(_) => panic!("expected serve"),
         }
     }
 
@@ -157,11 +206,25 @@ mod tests {
     #[test]
     fn max_tokens_accepts_the_closed_range() {
         let low = generate(
-            ["ingle", "generate", "--model", "m.gguf", "--max-tokens", "1"],
+            [
+                "ingle",
+                "generate",
+                "--model",
+                "m.gguf",
+                "--max-tokens",
+                "1",
+            ],
             None,
         );
         let high = generate(
-            ["ingle", "generate", "--model", "m.gguf", "--max-tokens", "4096"],
+            [
+                "ingle",
+                "generate",
+                "--model",
+                "m.gguf",
+                "--max-tokens",
+                "4096",
+            ],
             None,
         );
         assert_eq!(low.max_tokens, 1);
@@ -172,7 +235,14 @@ mod tests {
     fn max_tokens_outside_the_range_is_a_usage_error() {
         for raw in ["0", "4097"] {
             let error = parse_args(
-                ["ingle", "generate", "--model", "m.gguf", "--max-tokens", raw],
+                [
+                    "ingle",
+                    "generate",
+                    "--model",
+                    "m.gguf",
+                    "--max-tokens",
+                    raw,
+                ],
                 None,
             )
             .unwrap_err();
@@ -182,11 +252,8 @@ mod tests {
 
     #[test]
     fn an_unknown_flag_is_a_usage_error() {
-        let error = parse_args(
-            ["ingle", "generate", "--model", "m.gguf", "--nope"],
-            None,
-        )
-        .unwrap_err();
+        let error =
+            parse_args(["ingle", "generate", "--model", "m.gguf", "--nope"], None).unwrap_err();
         assert!(error.message.contains("--nope"));
     }
 
@@ -209,6 +276,44 @@ mod tests {
     fn an_empty_positional_prompt_is_rejected() {
         let command = generate(["ingle", "generate", "--model", "m.gguf", ""], None);
         assert_eq!(read_prompt(command.prompt, "from stdin"), Err(EmptyPrompt));
+    }
+
+    #[test]
+    fn serve_defaults_to_loopback_8080() {
+        let command = serve(["ingle", "serve", "--model", "m.gguf"], None);
+        assert_eq!(
+            command,
+            ServeCommand {
+                model: PathBuf::from("m.gguf"),
+                host: "127.0.0.1".to_string(),
+                port: 8080,
+            }
+        );
+    }
+
+    #[test]
+    fn serve_host_and_port_replace_the_defaults() {
+        let command = serve(
+            [
+                "ingle", "serve", "--model", "m.gguf", "--host", "0.0.0.0", "--port", "9",
+            ],
+            None,
+        );
+        assert_eq!(command.host, "0.0.0.0");
+        assert_eq!(command.port, 9);
+    }
+
+    #[test]
+    fn serve_uses_the_environment_when_the_flag_is_omitted() {
+        let command = serve(["ingle", "serve"], Some("from-env.gguf"));
+        assert_eq!(command.model, PathBuf::from("from-env.gguf"));
+        assert_eq!(command.port, 8080);
+    }
+
+    #[test]
+    fn serve_without_a_model_is_a_usage_error() {
+        let error = parse_args(["ingle", "serve"], None).unwrap_err();
+        assert!(error.message.contains("--model"));
     }
 
     #[test]
