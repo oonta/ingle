@@ -20,6 +20,7 @@ pub struct ModelCard {
     pub add_bos: bool,
     pub bos_id: u32,
     pub vocab_size: u32,
+    pub tokens: Vec<String>,
 }
 
 /// A model file cannot be used. The text is the process's startup line.
@@ -114,11 +115,18 @@ pub fn inspect_gguf(path: &Path, max_context: u32) -> Result<ModelCard, StartupE
             });
         }
     };
-    let vocab_size = match content.metadata.get("tokenizer.ggml.tokens") {
-        Some(Value::Array(tokens)) if !tokens.is_empty() => {
-            u32::try_from(tokens.len()).map_err(|_| StartupError::NoVocabulary {
-                path: path.to_path_buf(),
-            })?
+    let tokens = match content.metadata.get("tokenizer.ggml.tokens") {
+        Some(Value::Array(values)) if !values.is_empty() => {
+            let mut tokens = Vec::with_capacity(values.len());
+            for value in values {
+                let Value::String(token) = value else {
+                    return Err(StartupError::NoVocabulary {
+                        path: path.to_path_buf(),
+                    });
+                };
+                tokens.push(token.clone());
+            }
+            tokens
         }
         _ => {
             return Err(StartupError::NoVocabulary {
@@ -126,6 +134,9 @@ pub fn inspect_gguf(path: &Path, max_context: u32) -> Result<ModelCard, StartupE
             });
         }
     };
+    let vocab_size = u32::try_from(tokens.len()).map_err(|_| StartupError::NoVocabulary {
+        path: path.to_path_buf(),
+    })?;
 
     let context_length = require_u32(&content, path, "llama.context_length")?;
     let block_count = require_u32(&content, path, "llama.block_count")?;
@@ -176,6 +187,7 @@ pub fn inspect_gguf(path: &Path, max_context: u32) -> Result<ModelCard, StartupE
         add_bos,
         bos_id,
         vocab_size,
+        tokens,
     })
 }
 
@@ -449,6 +461,34 @@ mod tests {
         assert!(card.add_bos);
         assert_eq!(card.bos_id, 1);
         assert_eq!(card.vocab_size, 3);
+        assert_eq!(
+            card.tokens,
+            ["<unk>", "<s>", "</s>"].map(str::to_string)
+        );
+    }
+
+    #[test]
+    fn the_loaded_vocabulary_encodes_a_prompt_and_prepends_bos() {
+        let mut body = Vec::new();
+        let mut count = 0u64;
+        let mut add = |write: &dyn Fn(&mut Vec<u8>)| {
+            write(&mut body);
+            count += 1;
+        };
+        add(&|buf| kv_string(buf, "general.architecture", "llama"));
+        add(&|buf| kv_u32(buf, "llama.context_length", 128));
+        add(&|buf| kv_u32(buf, "llama.block_count", 1));
+        add(&|buf| kv_u32(buf, "llama.attention.head_count", 1));
+        add(&|buf| kv_u32(buf, "llama.attention.head_count_kv", 1));
+        add(&|buf| kv_u32(buf, "llama.embedding_length", 8));
+        add(&|buf| kv_u32(buf, "tokenizer.ggml.eos_token_id", 2));
+        add(&|buf| kv_strings(buf, "tokenizer.ggml.tokens", &["<s>", "hi"]));
+        add(&|buf| kv_bool(buf, "tokenizer.ggml.add_bos_token", true));
+        add(&|buf| kv_u32(buf, "tokenizer.ggml.bos_token_id", 0));
+        let file = TempFile::write("encode", &gguf(0, &body, count));
+        let card = inspect_gguf(&file.path, 4096).unwrap();
+        let ids = crate::encode::encode_prompt("hi", &card.tokens, card.add_bos, card.bos_id).unwrap();
+        assert_eq!(ids, vec![0, 1]);
     }
 
     #[test]
