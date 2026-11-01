@@ -34,6 +34,8 @@ pub enum StartupError {
     NoEos { path: PathBuf },
     MissingKey { path: PathBuf, key: &'static str },
     Read { path: PathBuf },
+    MissingAvx2,
+    KvPoolTooSmall,
 }
 
 impl std::fmt::Display for StartupError {
@@ -57,6 +59,8 @@ impl std::fmt::Display for StartupError {
             }
             Self::MissingKey { path, key } => write!(f, "missing {key} in {}", path.display()),
             Self::Read { path } => write!(f, "failed to read {}", path.display()),
+            Self::MissingAvx2 => write!(f, "the CPU lacks AVX2"),
+            Self::KvPoolTooSmall => write!(f, "the KV pool must be at least 64 MiB"),
         }
     }
 }

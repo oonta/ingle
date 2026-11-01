@@ -7,3 +7,6 @@ edition = "2024"
 candle-core = "0.9"
 candle-transformers = "0.9"
 clap = { version = "4", features = ["derive"] }
+sysinfo = { version = "0.37", default-features = false, features = ["system"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std", "ansi"] }

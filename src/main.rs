@@ -5,6 +5,11 @@ use ingle::cli::{parse_args, Command, PromptInput};
 use ingle::run::{generate_from_command, ContinuationError, RunError};
 
 fn main() -> ExitCode {
+    tracing_subscriber::fmt()
+        .with_writer(io::stderr)
+        .with_max_level(tracing::Level::INFO)
+        .with_target(false)
+        .init();
     let args: Vec<String> = std::env::args().collect();
     let infer_model = std::env::var("INFER_MODEL").ok();
     let command = match parse_args(args, infer_model.as_deref()) {

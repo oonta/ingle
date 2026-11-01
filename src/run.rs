@@ -5,6 +5,7 @@ use crate::encode::{decode_tokens, encode_prompt, DecodeError, EncodeError};
 use crate::generate::{greedy_continue, GenerateError, Model};
 use crate::llama::load_llama;
 use crate::load::{ModelCard, StartupError};
+use crate::platform::{detect_ram_mb, require_host_simd, resolve_kv_pool, startup_line, target_triple, PoolRequest};
 
 /// Working context when `generate` is not given `--max-context`.
 const DEFAULT_MAX_CONTEXT: u32 = 4096;
@@ -33,6 +34,9 @@ where
 /// Score an already parsed `generate` command. The caller reads stdin only for [`crate::cli::PromptInput::Stdin`].
 pub fn generate_from_command(command: GenerateCommand, stdin: &str) -> Result<String, RunError> {
     let prompt = read_prompt(command.prompt, stdin).map_err(|_| RunError::EmptyPrompt)?;
+    require_host_simd().map_err(RunError::Startup)?;
+    let pool = resolve_kv_pool(PoolRequest::Auto, detect_ram_mb()).map_err(RunError::Startup)?;
+    tracing::info!("{}", startup_line(target_triple(), &pool));
     let (card, mut model) =
         load_llama(&command.model, DEFAULT_MAX_CONTEXT).map_err(RunError::Startup)?;
     continuation_text(&mut model, &card, &prompt, command.max_tokens)
