@@ -63,6 +63,11 @@ impl std::fmt::Display for StartupError {
 
 /// Read the card from `path`. `max_context` caps `working_context`.
 pub fn inspect_gguf(path: &Path, max_context: u32) -> Result<ModelCard, StartupError> {
+    let (_file, content) = read_gguf(path)?;
+    card_from(path, max_context, &content)
+}
+
+pub(crate) fn read_gguf(path: &Path) -> Result<(File, Content), StartupError> {
     let mut file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -86,7 +91,14 @@ pub fn inspect_gguf(path: &Path, max_context: u32) -> Result<ModelCard, StartupE
         path: path.to_path_buf(),
     })?;
     let content = Content::read(&mut file).map_err(|error| classify_gguf_error(path, &error))?;
+    Ok((file, content))
+}
 
+pub(crate) fn card_from(
+    path: &Path,
+    max_context: u32,
+    content: &Content,
+) -> Result<ModelCard, StartupError> {
     let architecture = match content.metadata.get("general.architecture") {
         Some(Value::String(value)) => value.clone(),
         _ => {
@@ -138,12 +150,12 @@ pub fn inspect_gguf(path: &Path, max_context: u32) -> Result<ModelCard, StartupE
         path: path.to_path_buf(),
     })?;
 
-    let context_length = require_u32(&content, path, "llama.context_length")?;
-    let block_count = require_u32(&content, path, "llama.block_count")?;
-    let head_count = require_u32(&content, path, "llama.attention.head_count")?;
-    let head_count_kv = require_u32(&content, path, "llama.attention.head_count_kv")?;
-    let embedding_length = require_u32(&content, path, "llama.embedding_length")?;
-    let head_dim = head_dim(&content, path, head_count, embedding_length)?;
+    let context_length = require_u32(content, path, "llama.context_length")?;
+    let block_count = require_u32(content, path, "llama.block_count")?;
+    let head_count = require_u32(content, path, "llama.attention.head_count")?;
+    let head_count_kv = require_u32(content, path, "llama.attention.head_count_kv")?;
+    let embedding_length = require_u32(content, path, "llama.embedding_length")?;
+    let head_dim = head_dim(content, path, head_count, embedding_length)?;
     let rope_freq_base = match content.metadata.get("llama.rope.freq_base") {
         Some(Value::F32(value)) => *value,
         Some(Value::F64(value)) => *value as f32,
@@ -160,7 +172,7 @@ pub fn inspect_gguf(path: &Path, max_context: u32) -> Result<ModelCard, StartupE
         Some(Value::Bool(true))
     );
     let bos_id = if add_bos {
-        require_u32(&content, path, "tokenizer.ggml.bos_token_id")?
+        require_u32(content, path, "tokenizer.ggml.bos_token_id")?
     } else {
         0
     };
@@ -191,7 +203,7 @@ pub fn inspect_gguf(path: &Path, max_context: u32) -> Result<ModelCard, StartupE
     })
 }
 
-fn classify_gguf_error(path: &Path, error: &candle_core::Error) -> StartupError {
+pub(crate) fn classify_gguf_error(path: &Path, error: &candle_core::Error) -> StartupError {
     let text = error.to_string().to_ascii_lowercase();
     if text.contains("dtype") || text.contains("quant") {
         StartupError::UnsupportedQuantization {

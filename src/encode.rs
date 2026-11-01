@@ -64,6 +64,27 @@ fn longest_piece(pieces: &HashMap<&str, u32>, text: &str) -> Option<(u32, usize)
     None
 }
 
+/// An id is outside the vocabulary. `at` is its index in `ids`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DecodeError {
+    pub at: usize,
+}
+
+/// Join token pieces. ▁ becomes a space and `<0xHH>` becomes that byte.
+pub fn decode_tokens(ids: &[u32], tokens: &[String]) -> Result<String, DecodeError> {
+    let mut bytes = Vec::new();
+    for (at, id) in ids.iter().copied().enumerate() {
+        let index = usize::try_from(id).map_err(|_| DecodeError { at })?;
+        let token = tokens.get(index).ok_or(DecodeError { at })?;
+        if let Some(byte) = byte_token(token) {
+            bytes.push(byte);
+        } else {
+            bytes.extend_from_slice(token.replace('▁', " ").as_bytes());
+        }
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 fn byte_token(token: &str) -> Option<u8> {
     let hex = token.strip_prefix("<0x")?.strip_suffix('>')?;
     if hex.len() != 2 {
@@ -74,7 +95,7 @@ fn byte_token(token: &str) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{EncodeError, encode_prompt};
+    use super::{DecodeError, EncodeError, decode_tokens, encode_prompt};
 
     fn vocab(tokens: &[&str]) -> Vec<String> {
         tokens.iter().map(|token| (*token).to_string()).collect()
@@ -116,5 +137,27 @@ mod tests {
         assert_eq!(ids, vec![0, 1]);
         let again = encode_prompt("<s>ab", &vocab(&["<s>", "ab"]), true, 0).unwrap();
         assert_eq!(again, vec![0, 1]);
+    }
+
+    #[test]
+    fn a_space_piece_round_trips() {
+        let tokens = vocab(&["hello", "▁world"]);
+        let ids = encode_prompt("hello world", &tokens, false, 0).unwrap();
+        assert_eq!(decode_tokens(&ids, &tokens).unwrap(), "hello world");
+    }
+
+    #[test]
+    fn a_byte_token_round_trips() {
+        let tokens = vocab(&["<0x41>"]);
+        let ids = encode_prompt("A", &tokens, false, 0).unwrap();
+        assert_eq!(decode_tokens(&ids, &tokens).unwrap(), "A");
+    }
+
+    #[test]
+    fn an_id_past_the_vocabulary_is_an_error() {
+        assert_eq!(
+            decode_tokens(&[3], &vocab(&["a"])),
+            Err(DecodeError { at: 0 })
+        );
     }
 }

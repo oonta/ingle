@@ -1,6 +1,8 @@
 pub mod cli;
 pub mod encode;
 pub mod generate;
+pub mod llama;
 pub mod load;
+pub mod run;
 pub mod sample;
 pub mod tokenize;
