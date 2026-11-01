@@ -2,7 +2,7 @@ use std::io::{self, Read, Write};
 use std::process::ExitCode;
 
 use ingle::cli::{Command, PromptInput, parse_args};
-use ingle::http::health_router;
+use ingle::http::serve_router;
 use ingle::run::{ContinuationError, RunError, generate_from_command, open_serve};
 
 fn main() -> ExitCode {
@@ -49,6 +49,7 @@ fn serve(command: ingle::cli::ServeCommand) -> ExitCode {
         Ok(listening) => listening,
         Err(error) => return exit_run(error),
     };
+    let model_name = listening.card.name;
     let address = match listening.listener.local_addr() {
         Ok(address) => address.to_string(),
         Err(_) => format!("{}:{}", command.host, command.port),
@@ -76,7 +77,7 @@ fn serve(command: ingle::cli::ServeCommand) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    match runtime.block_on(async { axum::serve(listener, health_router()).await }) {
+    match runtime.block_on(async { axum::serve(listener, serve_router(&model_name)).await }) {
         Ok(()) => ExitCode::SUCCESS,
         Err(_) => {
             eprintln!("the server stopped");

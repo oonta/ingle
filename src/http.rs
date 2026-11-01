@@ -1,6 +1,7 @@
 use std::io;
 use std::net::{IpAddr, SocketAddr, TcpListener};
 
+use axum::extract::State;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
@@ -18,7 +19,46 @@ async fn health() -> Json<HealthBody> {
 
 /// Routes that exist only after the model has loaded.
 pub fn health_router() -> Router {
-    Router::new().route("/health", get(health))
+    serve_router("")
+}
+
+#[derive(Clone)]
+struct AppState {
+    model_name: String,
+}
+
+#[derive(Serialize)]
+struct ModelList {
+    object: &'static str,
+    data: Vec<ModelItem>,
+}
+
+#[derive(Serialize)]
+struct ModelItem {
+    id: String,
+    object: &'static str,
+    owned_by: &'static str,
+}
+
+async fn list_models(State(state): State<AppState>) -> Json<ModelList> {
+    Json(ModelList {
+        object: "list",
+        data: vec![ModelItem {
+            id: state.model_name,
+            object: "model",
+            owned_by: "local",
+        }],
+    })
+}
+
+/// The loaded model is the only entry `GET /v1/models` may return.
+pub fn serve_router(model_name: &str) -> Router {
+    Router::new()
+        .route("/health", get(health))
+        .route("/v1/models", get(list_models))
+        .with_state(AppState {
+            model_name: model_name.to_string(),
+        })
 }
 
 /// Open `addr` on the process. An occupied port is distinct from any other bind failure.
@@ -46,7 +86,7 @@ pub fn serve_addr(host: &str, port: u16) -> Result<SocketAddr, StartupError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{bind_listener, health_router, serve_addr};
+    use super::{bind_listener, health_router, serve_addr, serve_router};
     use crate::load::StartupError;
     use axum::body::Body;
     use axum::http::Request;
@@ -67,6 +107,27 @@ mod tests {
         assert_eq!(response.status(), 200);
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(bytes.as_ref(), br#"{"status":"ok"}"#);
+    }
+
+    #[tokio::test]
+    async fn get_models_lists_the_loaded_name() {
+        for name in ["tiny", "other name"] {
+            let response = serve_router(name)
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/models")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200);
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let expected = format!(
+                r#"{{"object":"list","data":[{{"id":"{name}","object":"model","owned_by":"local"}}]}}"#
+            );
+            assert_eq!(bytes.as_ref(), expected.as_bytes());
+        }
     }
 
     #[tokio::test]
