@@ -2,6 +2,7 @@ use std::io;
 use std::net::{IpAddr, SocketAddr, TcpListener};
 
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
@@ -40,6 +41,32 @@ struct ModelItem {
     owned_by: &'static str,
 }
 
+#[derive(Serialize)]
+struct ErrorResponse {
+    error: ApiError,
+}
+
+#[derive(Serialize)]
+struct ApiError {
+    message: &'static str,
+    #[serde(rename = "type")]
+    error_type: &'static str,
+    code: &'static str,
+}
+
+async fn method_not_allowed() -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::METHOD_NOT_ALLOWED,
+        Json(ErrorResponse {
+            error: ApiError {
+                message: "method not allowed",
+                error_type: "invalid_request_error",
+                code: "method_not_allowed",
+            },
+        }),
+    )
+}
+
 async fn list_models(State(state): State<AppState>) -> Json<ModelList> {
     Json(ModelList {
         object: "list",
@@ -54,8 +81,8 @@ async fn list_models(State(state): State<AppState>) -> Json<ModelList> {
 /// The loaded model is the only entry `GET /v1/models` may return.
 pub fn serve_router(model_name: &str) -> Router {
     Router::new()
-        .route("/health", get(health))
-        .route("/v1/models", get(list_models))
+        .route("/health", get(health).fallback(method_not_allowed))
+        .route("/v1/models", get(list_models).fallback(method_not_allowed))
         .with_state(AppState {
             model_name: model_name.to_string(),
         })
@@ -128,6 +155,43 @@ mod tests {
             );
             assert_eq!(bytes.as_ref(), expected.as_bytes());
         }
+    }
+
+    #[tokio::test]
+    async fn a_wrong_method_on_a_known_path_is_method_not_allowed() {
+        for uri in ["/health", "/v1/models"] {
+            let response = serve_router("tiny")
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 405, "{uri}");
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(
+                bytes.as_ref(),
+                br#"{"error":{"message":"method not allowed","type":"invalid_request_error","code":"method_not_allowed"}}"#,
+                "{uri}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unknown_path_is_not_method_not_allowed() {
+        let response = serve_router("tiny")
+            .oneshot(
+                Request::builder()
+                    .uri("/missing")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 404);
     }
 
     #[tokio::test]
