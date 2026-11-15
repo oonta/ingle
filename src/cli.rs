@@ -24,6 +24,19 @@ pub struct ServeCommand {
     pub model: PathBuf,
     pub host: String,
     pub port: u16,
+    pub api_key: Option<String>,
+    pub max_body_bytes: usize,
+    pub queue_capacity: usize,
+    pub shutdown_timeout_ms: u64,
+}
+
+/// Environment values that fill serve flags the command line omitted.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ServeEnv<'a> {
+    pub api_key: Option<&'a str>,
+    pub max_body_bytes: Option<&'a str>,
+    pub queue_capacity: Option<&'a str>,
+    pub shutdown_timeout_ms: Option<&'a str>,
 }
 
 /// Where the prompt text comes from.
@@ -76,6 +89,18 @@ enum CliCommand {
         /// Port to bind.
         #[arg(long, default_value_t = 8080)]
         port: u16,
+        /// Bearer token. An empty value disables the check.
+        #[arg(long, value_name = "KEY")]
+        api_key: Option<String>,
+        /// Maximum request body in bytes.
+        #[arg(long, default_value_t = 1_048_576)]
+        max_body_bytes: usize,
+        /// Requests that may wait behind the one that is running.
+        #[arg(long, default_value_t = 64)]
+        queue_capacity: usize,
+        /// Milliseconds to drain the current request after Ctrl+C.
+        #[arg(long, default_value_t = 10_000)]
+        shutdown_timeout_ms: u64,
     },
 }
 
@@ -111,9 +136,25 @@ where
                 prompt,
             }))
         }
-        CliCommand::Serve { model, host, port } => {
+        CliCommand::Serve {
+            model,
+            host,
+            port,
+            api_key,
+            max_body_bytes,
+            queue_capacity,
+            shutdown_timeout_ms,
+        } => {
             let model = resolve_model(model, infer_model)?;
-            Ok(Command::Serve(ServeCommand { model, host, port }))
+            Ok(Command::Serve(ServeCommand {
+                model,
+                host,
+                port,
+                api_key,
+                max_body_bytes,
+                queue_capacity,
+                shutdown_timeout_ms,
+            }))
         }
     }
 }
@@ -133,6 +174,59 @@ fn resolve_model(model: Option<PathBuf>, infer_model: Option<&str>) -> Result<Pa
     }
 }
 
+/// Fill serve limits the command line left at their defaults.
+/// A present flag wins. An empty `INFER_API_KEY` or an empty `--api-key` disables the check.
+pub fn apply_serve_env(
+    command: &mut ServeCommand,
+    args: &[impl AsRef<str>],
+    env: ServeEnv<'_>,
+) -> Result<(), UsageError> {
+    if !flag_set(args, "--api-key") {
+        if let Some(value) = nonempty(env.api_key) {
+            command.api_key = Some(value.to_string());
+        }
+    } else if command.api_key.as_deref().is_some_and(str::is_empty) {
+        command.api_key = None;
+    }
+    if !flag_set(args, "--max-body-bytes") {
+        if let Some(value) = nonempty(env.max_body_bytes) {
+            command.max_body_bytes = parse_env(value, "INFER_MAX_BODY_BYTES")?;
+        }
+    }
+    if !flag_set(args, "--queue-capacity") {
+        if let Some(value) = nonempty(env.queue_capacity) {
+            command.queue_capacity = parse_env(value, "INFER_QUEUE_CAPACITY")?;
+        }
+    }
+    if !flag_set(args, "--shutdown-timeout-ms") {
+        if let Some(value) = nonempty(env.shutdown_timeout_ms) {
+            command.shutdown_timeout_ms = parse_env(value, "INFER_SHUTDOWN_TIMEOUT_MS")?;
+        }
+    }
+    Ok(())
+}
+
+fn nonempty(value: Option<&str>) -> Option<&str> {
+    value.filter(|text| !text.is_empty())
+}
+
+fn flag_set(args: &[impl AsRef<str>], name: &str) -> bool {
+    let with_equals = format!("{name}=");
+    args.iter().any(|arg| {
+        let arg = arg.as_ref();
+        arg == name || arg.starts_with(&with_equals)
+    })
+}
+
+fn parse_env<T: std::str::FromStr>(value: &str, name: &str) -> Result<T, UsageError> {
+    value.parse().map_err(|_| UsageError {
+        message: format!(
+            "{name} is not an integer\n\n{}",
+            Cli::command().render_help()
+        ),
+    })
+}
+
 /// Resolve the prompt text. A positional value is used as-is and `stdin` is ignored.
 pub fn read_prompt(input: PromptInput, stdin: &str) -> Result<String, EmptyPrompt> {
     let text = match input {
@@ -149,7 +243,8 @@ pub fn read_prompt(input: PromptInput, stdin: &str) -> Result<String, EmptyPromp
 #[cfg(test)]
 mod tests {
     use super::{
-        Command, EmptyPrompt, GenerateCommand, PromptInput, ServeCommand, parse_args, read_prompt,
+        Command, EmptyPrompt, GenerateCommand, PromptInput, ServeCommand, ServeEnv,
+        apply_serve_env, parse_args, read_prompt,
     };
     use std::path::PathBuf;
 
@@ -287,6 +382,10 @@ mod tests {
                 model: PathBuf::from("m.gguf"),
                 host: "127.0.0.1".to_string(),
                 port: 8080,
+                api_key: None,
+                max_body_bytes: 1_048_576,
+                queue_capacity: 64,
+                shutdown_timeout_ms: 10_000,
             }
         );
     }
@@ -308,6 +407,98 @@ mod tests {
         let command = serve(["ingle", "serve"], Some("from-env.gguf"));
         assert_eq!(command.model, PathBuf::from("from-env.gguf"));
         assert_eq!(command.port, 8080);
+    }
+
+    #[test]
+    fn an_api_key_from_the_environment_fills_an_omitted_flag() {
+        let mut command = serve(["ingle", "serve", "--model", "m.gguf"], None);
+        apply_serve_env(
+            &mut command,
+            &["ingle", "serve", "--model", "m.gguf"],
+            ServeEnv {
+                api_key: Some("secret"),
+                max_body_bytes: Some("32"),
+                queue_capacity: Some("2"),
+                shutdown_timeout_ms: Some("50"),
+            },
+        )
+        .unwrap();
+        assert_eq!(command.api_key.as_deref(), Some("secret"));
+        assert_eq!(command.max_body_bytes, 32);
+        assert_eq!(command.queue_capacity, 2);
+        assert_eq!(command.shutdown_timeout_ms, 50);
+    }
+
+    #[test]
+    fn a_present_flag_wins_over_the_environment() {
+        let mut command = serve(
+            [
+                "ingle",
+                "serve",
+                "--model",
+                "m.gguf",
+                "--api-key",
+                "flag",
+                "--queue-capacity",
+                "3",
+            ],
+            None,
+        );
+        apply_serve_env(
+            &mut command,
+            &[
+                "ingle",
+                "serve",
+                "--model",
+                "m.gguf",
+                "--api-key",
+                "flag",
+                "--queue-capacity",
+                "3",
+            ],
+            ServeEnv {
+                api_key: Some("env"),
+                queue_capacity: Some("9"),
+                ..ServeEnv::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(command.api_key.as_deref(), Some("flag"));
+        assert_eq!(command.queue_capacity, 3);
+        assert_eq!(command.max_body_bytes, 1_048_576);
+    }
+
+    #[test]
+    fn an_empty_api_key_disables_the_check() {
+        let mut command = serve(
+            ["ingle", "serve", "--model", "m.gguf", "--api-key", ""],
+            None,
+        );
+        apply_serve_env(
+            &mut command,
+            &["ingle", "serve", "--model", "m.gguf", "--api-key", ""],
+            ServeEnv {
+                api_key: Some("env"),
+                ..ServeEnv::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(command.api_key, None);
+    }
+
+    #[test]
+    fn a_bad_limit_in_the_environment_is_a_usage_error() {
+        let mut command = serve(["ingle", "serve", "--model", "m.gguf"], None);
+        let error = apply_serve_env(
+            &mut command,
+            &["ingle", "serve", "--model", "m.gguf"],
+            ServeEnv {
+                queue_capacity: Some("nope"),
+                ..ServeEnv::default()
+            },
+        )
+        .unwrap_err();
+        assert!(error.message.contains("INFER_QUEUE_CAPACITY"));
     }
 
     #[test]

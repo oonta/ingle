@@ -68,6 +68,12 @@ pub fn open_serve(command: &ServeCommand) -> Result<Listening, RunError> {
     tracing::info!("{}", startup_line(target_triple(), &pool));
     let (card, model) =
         load_llama(&command.model, DEFAULT_MAX_CONTEXT).map_err(RunError::Startup)?;
+    let template = if card.chat_template.is_some() {
+        "gguf"
+    } else {
+        "chatml"
+    };
+    tracing::info!("chat_template={template}");
     let addr = serve_addr(&command.host, command.port).map_err(RunError::Startup)?;
     let listener = bind_listener(addr).map_err(RunError::Startup)?;
     Ok(Listening {
@@ -138,6 +144,7 @@ mod tests {
             bos_id: 0,
             vocab_size: 3,
             tokens: ["<s>", "yo", "</s>"].map(str::to_string).to_vec(),
+            chat_template: None,
         }
     }
 
@@ -208,6 +215,10 @@ mod tests {
             model: path.clone(),
             host: "192.0.2.1".to_string(),
             port: 9,
+            api_key: None,
+            max_body_bytes: 1_048_576,
+            queue_capacity: 64,
+            shutdown_timeout_ms: 10_000,
         }) {
             Err(error) => error,
             Ok(_) => panic!("expected a missing file"),

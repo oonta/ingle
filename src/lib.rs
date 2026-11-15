@@ -1,4 +1,6 @@
+pub mod chat;
 pub mod cli;
+pub mod complete;
 pub mod encode;
 pub mod generate;
 pub mod http;
@@ -7,4 +9,5 @@ pub mod load;
 pub mod platform;
 pub mod run;
 pub mod sample;
+pub mod stop;
 pub mod tokenize;

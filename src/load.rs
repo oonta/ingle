@@ -21,6 +21,7 @@ pub struct ModelCard {
     pub bos_id: u32,
     pub vocab_size: u32,
     pub tokens: Vec<String>,
+    pub chat_template: Option<String>,
 }
 
 /// A model file cannot be used. The text is the process's startup line.
@@ -203,6 +204,10 @@ pub(crate) fn card_from(
             .unwrap_or("model")
             .to_string(),
     };
+    let chat_template = match content.metadata.get("tokenizer.chat_template") {
+        Some(Value::String(value)) if !value.is_empty() => Some(value.clone()),
+        _ => None,
+    };
 
     Ok(ModelCard {
         name,
@@ -219,6 +224,7 @@ pub(crate) fn card_from(
         bos_id,
         vocab_size,
         tokens,
+        chat_template,
     })
 }
 
@@ -512,6 +518,16 @@ mod tests {
         assert_eq!(card.bos_id, 1);
         assert_eq!(card.vocab_size, 3);
         assert_eq!(card.tokens, ["<unk>", "<s>", "</s>"].map(str::to_string));
+        assert_eq!(card.chat_template, None);
+    }
+
+    #[test]
+    fn a_chat_template_is_copied_from_metadata() {
+        let (mut body, count) = llama_body(Some("tiny"), None, None, false);
+        kv_string(&mut body, "tokenizer.chat_template", "{{ messages }}");
+        let file = TempFile::write("template", &gguf(0, &body, count + 1));
+        let card = inspect_gguf(&file.path, 4096).unwrap();
+        assert_eq!(card.chat_template.as_deref(), Some("{{ messages }}"));
     }
 
     #[test]
