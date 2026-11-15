@@ -82,7 +82,9 @@ async fn method_not_allowed() -> (StatusCode, Json<ErrorResponse>) {
 }
 
 #[derive(Deserialize)]
-struct ChatMessage {}
+struct ChatMessage {
+    role: String,
+}
 
 #[derive(Deserialize)]
 struct ChatRequest {
@@ -94,6 +96,18 @@ async fn chat(Json(request): Json<ChatRequest>) -> (StatusCode, Json<ErrorRespon
         return api_error(
             StatusCode::BAD_REQUEST,
             "messages must not be empty",
+            "invalid_request_error",
+            "bad_request",
+        );
+    }
+    if request
+        .messages
+        .iter()
+        .any(|message| !matches!(message.role.as_str(), "system" | "user" | "assistant"))
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "the message role is unknown",
             "invalid_request_error",
             "bad_request",
         );
@@ -222,26 +236,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_user_message_is_not_rejected_as_empty() {
-        let response = serve_router("tiny")
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/chat/completions")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"model":"tiny","messages":[{"role":"user","content":"hi"}]}"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), 500);
-        let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(
-            bytes.as_ref(),
-            br#"{"error":{"message":"the completion is not available","type":"server_error","code":"internal"}}"#
-        );
+    async fn an_unknown_role_is_a_bad_request() {
+        for body in [
+            r#"{"model":"tiny","messages":[{"role":"tool","content":"hi"}]}"#,
+            r#"{"model":"tiny","messages":[{"role":"user","content":"hi"},{"role":"tool","content":"x"}]}"#,
+        ] {
+            let response = serve_router("tiny")
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/chat/completions")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 400, "{body}");
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(
+                bytes.as_ref(),
+                br#"{"error":{"message":"the message role is unknown","type":"invalid_request_error","code":"bad_request"}}"#,
+                "{body}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_known_role_is_not_rejected() {
+        for role in ["system", "user", "assistant"] {
+            let body =
+                format!(r#"{{"model":"tiny","messages":[{{"role":"{role}","content":"hi"}}]}}"#);
+            let response = serve_router("tiny")
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/chat/completions")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 500, "{role}");
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(
+                bytes.as_ref(),
+                br#"{"error":{"message":"the completion is not available","type":"server_error","code":"internal"}}"#,
+                "{role}"
+            );
+        }
     }
 
     #[tokio::test]
