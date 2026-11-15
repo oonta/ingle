@@ -3,9 +3,9 @@ use std::net::{IpAddr, SocketAddr, TcpListener};
 
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::load::StartupError;
 
@@ -54,16 +54,55 @@ struct ApiError {
     code: &'static str,
 }
 
-async fn method_not_allowed() -> (StatusCode, Json<ErrorResponse>) {
+fn api_error(
+    status: StatusCode,
+    message: &'static str,
+    error_type: &'static str,
+    code: &'static str,
+) -> (StatusCode, Json<ErrorResponse>) {
     (
-        StatusCode::METHOD_NOT_ALLOWED,
+        status,
         Json(ErrorResponse {
             error: ApiError {
-                message: "method not allowed",
-                error_type: "invalid_request_error",
-                code: "method_not_allowed",
+                message,
+                error_type,
+                code,
             },
         }),
+    )
+}
+
+async fn method_not_allowed() -> (StatusCode, Json<ErrorResponse>) {
+    api_error(
+        StatusCode::METHOD_NOT_ALLOWED,
+        "method not allowed",
+        "invalid_request_error",
+        "method_not_allowed",
+    )
+}
+
+#[derive(Deserialize)]
+struct ChatMessage {}
+
+#[derive(Deserialize)]
+struct ChatRequest {
+    messages: Vec<ChatMessage>,
+}
+
+async fn chat(Json(request): Json<ChatRequest>) -> (StatusCode, Json<ErrorResponse>) {
+    if request.messages.is_empty() {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "messages must not be empty",
+            "invalid_request_error",
+            "bad_request",
+        );
+    }
+    api_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "the completion is not available",
+        "server_error",
+        "internal",
     )
 }
 
@@ -83,6 +122,10 @@ pub fn serve_router(model_name: &str) -> Router {
     Router::new()
         .route("/health", get(health).fallback(method_not_allowed))
         .route("/v1/models", get(list_models).fallback(method_not_allowed))
+        .route(
+            "/v1/chat/completions",
+            post(chat).fallback(method_not_allowed),
+        )
         .with_state(AppState {
             model_name: model_name.to_string(),
         })
@@ -158,19 +201,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn empty_messages_are_a_bad_request() {
+        let response = serve_router("tiny")
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"model":"tiny","messages":[]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 400);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            bytes.as_ref(),
+            br#"{"error":{"message":"messages must not be empty","type":"invalid_request_error","code":"bad_request"}}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn a_user_message_is_not_rejected_as_empty() {
+        let response = serve_router("tiny")
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"tiny","messages":[{"role":"user","content":"hi"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 500);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            bytes.as_ref(),
+            br#"{"error":{"message":"the completion is not available","type":"server_error","code":"internal"}}"#
+        );
+    }
+
+    #[tokio::test]
     async fn a_wrong_method_on_a_known_path_is_method_not_allowed() {
-        for uri in ["/health", "/v1/models"] {
+        for (method, uri) in [
+            ("POST", "/health"),
+            ("POST", "/v1/models"),
+            ("GET", "/v1/chat/completions"),
+        ] {
             let response = serve_router("tiny")
                 .oneshot(
                     Request::builder()
-                        .method("POST")
+                        .method(method)
                         .uri(uri)
                         .body(Body::empty())
                         .unwrap(),
                 )
                 .await
                 .unwrap();
-            assert_eq!(response.status(), 405, "{uri}");
+            assert_eq!(response.status(), 405, "{method} {uri}");
             let bytes = response.into_body().collect().await.unwrap().to_bytes();
             assert_eq!(
                 bytes.as_ref(),
