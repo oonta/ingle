@@ -89,10 +89,14 @@ struct ChatMessage {
 
 #[derive(Deserialize)]
 struct ChatRequest {
+    model: String,
     messages: Vec<ChatMessage>,
 }
 
-async fn chat(Json(request): Json<ChatRequest>) -> (StatusCode, Json<ErrorResponse>) {
+async fn chat(
+    State(state): State<AppState>,
+    Json(request): Json<ChatRequest>,
+) -> (StatusCode, Json<ErrorResponse>) {
     if request.messages.is_empty() {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -123,6 +127,14 @@ async fn chat(Json(request): Json<ChatRequest>) -> (StatusCode, Json<ErrorRespon
             "message content must be a string",
             "invalid_request_error",
             "bad_request",
+        );
+    }
+    if request.model != state.model_name {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "the model was not found",
+            "invalid_request_error",
+            "model_not_found",
         );
     }
     api_error(
@@ -302,6 +314,29 @@ mod tests {
                 "{body}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_different_model_name_is_not_found() {
+        let response = serve_router("tiny")
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"other","messages":[{"role":"user","content":"hi"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 404);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            bytes.as_ref(),
+            br#"{"error":{"message":"the model was not found","type":"invalid_request_error","code":"model_not_found"}}"#
+        );
     }
 
     #[tokio::test]
